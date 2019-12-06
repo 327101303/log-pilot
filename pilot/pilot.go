@@ -64,15 +64,18 @@ type Pilot struct {
 
 // Run start log pilot
 func Run(templ string, baseDir string) error {
+	// 初始化pilot，通过模板和根路径参数，返回一个pilot指针
 	p, err := New(templ, baseDir)
 	if err != nil {
 		panic(err)
 	}
-	return p.watch()
+	return p.watch() //执行pilot的watch方法
 }
+
 
 // New returns a log pilot instance
 func New(tplStr string, baseDir string) (*Pilot, error) {
+
 	templ, err := template.New("pilot").Parse(tplStr)
 	if err != nil {
 		return nil, err
@@ -112,6 +115,7 @@ func New(tplStr string, baseDir string) (*Pilot, error) {
 }
 
 func (p *Pilot) watch() error {
+	// 清理配置，配置目录中如果有非普通文件类型的，执行remove
 	if err := p.cleanConfigs(); err != nil {
 		return err
 	}
@@ -130,7 +134,7 @@ func (p *Pilot) watch() error {
 	options := types.EventsOptions{
 		Filters: filter,
 	}
-
+	//监听docker events api的变化
 	msgs, errs := p.client.Events(ctx, options)
 
 	go func() {
@@ -152,7 +156,9 @@ func (p *Pilot) watch() error {
 				if err == io.EOF || err == io.ErrUnexpectedEOF {
 					return
 				}
+				// 如果上面两个分支都没执行成功，default。启动监听event事件循环
 				msgs, errs = p.client.Events(ctx, options)
+
 			}
 		}
 	}()
@@ -183,27 +189,34 @@ type LogConfig struct {
 }
 
 func (p *Pilot) cleanConfigs() error {
+	//清理配置，加读写锁
 	p.mutex.Lock()
 	defer p.mutex.Unlock()
 
+	// 获取配置目录
 	confDir := fmt.Sprintf(p.piloter.GetConfHome())
+	// 打开目录
 	d, err := os.Open(confDir)
 	if err != nil {
 		return err
 	}
 	defer d.Close()
 
+	// 递归遍历目录中的文件，参数n<=0 则将全部的信息存入到一个slice中返回
+	// 如果参数n>0则至多返回n个元素的信息存入到slice当中
+	// 还有一个类似的函数是Readdir 这个返回的是 目录中的内容的Fileinfo信息
 	names, err := d.Readdirnames(-1)
 	if err != nil {
 		return err
 	}
-
+	// 遍历目录下的文件，拼接后，用os.stat检测
 	for _, name := range names {
 		conf := filepath.Join(confDir, name)
 		stat, err := os.Stat(filepath.Join(confDir, name))
 		if err != nil {
 			return err
 		}
+		// 判断是否为普通文件
 		if stat.Mode().IsRegular() {
 			if err := os.Remove(conf); err != nil {
 				return err
@@ -212,41 +225,43 @@ func (p *Pilot) cleanConfigs() error {
 	}
 	return nil
 }
-
+// 处理所有需要采集日志的容器
 func (p *Pilot) processAllContainers() error {
+	// 加写锁
 	p.mutex.Lock()
 	defer p.mutex.Unlock()
 
 	log.Debug("process all container log config")
 
-	opts := types.ContainerListOptions{}
+	opts := types.ContainerListOptions{} // 初始化一个空结构体，保存用于列出容器的参数。docker client库中的struc
 	containers, err := p.client.ContainerList(context.Background(), opts)
 	if err != nil {
 		log.Errorf("fail to list container: %v", err)
 		return nil
 	}
-
+	//创建一个map存放容器id，长度为0的map
 	containerIDs := make(map[string]string, 0)
 	for _, c := range containers {
+		// 如果map  cIDS中不包含该容器id，就把这个id放进map中，map["c.ID"]"c.ID"
 		if _, ok := containerIDs[c.ID]; !ok {
 			containerIDs[c.ID] = c.ID
 		}
-
+		// 如果容器的状态是正在删除，直接跳过
 		if c.State == "removing" {
 			continue
 		}
-
+		//  pilot的检测容器采集日志的配置文件是否存在的方法，参数是容器id，返回值是布尔值，存在为真，不存在为假，
 		if p.exists(c.ID) {
 			log.Debugf("%s is already exists", c.ID)
 			continue
 		}
-
+		// 如果通过容器id获取inspect信息
 		containerJSON, err := p.client.ContainerInspect(context.Background(), c.ID)
 		if err != nil {
 			log.Errorf("fail to inspect container %s: %v", c.ID, err)
 			continue
 		}
-
+		// 调用newContainer方法，
 		if err = p.newContainer(&containerJSON); err != nil {
 			log.Errorf("fail to process container %s: %v", containerJSON.Name, err)
 		}
@@ -332,6 +347,7 @@ func container(containerJSON *types.ContainerJSON) map[string]string {
 	return c
 }
 
+// 通过容器的inspect信息，获取到容器id、env、mounts、labels、jsonlogpath
 func (p *Pilot) newContainer(containerJSON *types.ContainerJSON) error {
 	id := containerJSON.ID
 	env := containerJSON.Config.Env
@@ -347,7 +363,7 @@ func (p *Pilot) newContainer(containerJSON *types.ContainerJSON) error {
 
 	  查找：从containerdir开始查找最近的一层挂载
 	*/
-
+	// 把传参进来的json内容反射为container对象
 	container := container(containerJSON)
 
 	for _, e := range env {
@@ -431,23 +447,25 @@ func (p *Pilot) delContainer(id string) error {
 }
 
 func (p *Pilot) processEvent(msg events.Message) error {
+	//通过docker event api提供的数据，获取到容器的ID
 	containerId := msg.Actor.ID
 	ctx := context.Background()
 
-	switch msg.Action {
+	switch msg.Action { //只监听docker event api中正确返回的事件
 	case "start", "restart":
 		log.Debugf("Process container start event: %s", containerId)
-
+		// 如果从event中取出的id已经在pilot
 		if p.exists(containerId) {
+			// pilot的检测容器采集日志的配置文件是否存在的方法，参数是容器id，返回值是布尔值，存在为真，不存在为假
 			log.Debugf("%s is already exists", containerId)
 			return nil
 		}
-
+		// 如果event事件中状态发生了start和restart状态的容器，没有发现日志采集的配置文件，就获取容器的inspect
 		containerJSON, err := p.client.ContainerInspect(ctx, containerId)
 		if err != nil {
 			return err
 		}
-
+		//
 		return p.newContainer(&containerJSON)
 	//Increase the monitoring of container Exit events and repair the log duplicate collection caused by the failure to delete the exited container in time
 	case "destroy", "die":
@@ -713,11 +731,13 @@ func (p *Pilot) getLogConfigs(jsonLogPath string, mounts []types.MountPoint, lab
 	return ret, nil
 }
 
+// pilot的检测容器采集日志的配置文件是否存在的方法，参数是容器id，返回值是布尔值，存在为真，不存在为假
 func (p *Pilot) exists(containId string) bool {
+	//先getconfpath获取该容器id对应的filebeat配置文件路径，再用os.stat探测文件是否存在，
 	if _, err := os.Stat(p.piloter.GetConfPath(containId)); os.IsNotExist(err) {
-		return false
+		return false  // 不存在为假
 	}
-	return true
+	return true  // 存在为真
 }
 
 func (p *Pilot) render(containerId string, container map[string]string, configList []*LogConfig) (string, error) {

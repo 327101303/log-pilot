@@ -1,8 +1,8 @@
 log-pilot
 =========
 
-[![CircleCI](https://circleci.com/gh/AliyunContainerService/log-pilot.svg?style=svg)](https://circleci.com/gh/AliyunContainerService/log-pilot)
-[![Go Report Card](https://goreportcard.com/badge/github.com/AliyunContainerService/log-pilot)](https://goreportcard.com/report/github.com/AliyunContainerService/log-pilot)
+[![CircleCI](https://circleci.com/gh/327101303/log-pilot.svg?style=svg)](https://circleci.com/gh/327101303/log-pilot)
+[![Go Report Card](https://goreportcard.com/badge/github.com/327101303/log-pilot)](https://goreportcard.com/report/github.com/327101303/log-pilot)
 
 `log-pilot` is an awesome docker log tool. With `log-pilot` you can collect logs from docker hosts and send them to your centralized log system such as elasticsearch, graylog2, awsog and etc. `log-pilot` can collect not only docker stdout but also log file that inside docker containers.
 
@@ -16,7 +16,7 @@ Prerequisites:
 
 ```
 # download log-pilot project
-git clone git@github.com:AliyunContainerService/log-pilot.git
+git clone git@github.com:327101303/log-pilot.git
 # build log-pilot image
 cd log-pilot/ && ./build-image.sh
 # quick start
@@ -78,8 +78,8 @@ Prerequisites:
 - Go >= 1.6
 
 ```
-go get github.com/AliyunContainerService/log-pilot
-cd $GOPATH/github.com/AliyunContainerService/log-pilot
+go get github.com/327101303/log-pilot
+cd $GOPATH/github.com/327101303/log-pilot
 # This will create a new docker image named log-pilot:latest
 ./build-image.sh
 ```
