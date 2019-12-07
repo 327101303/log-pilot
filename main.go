@@ -13,7 +13,7 @@ func main() {
 	// 获取参数
 	// 模板文件的路径
 	template := flag.String("template", "", "Template filepath for fluentd or filebeat.")
-	// 宿主机root目录挂载路径
+	// 宿主机root目录挂载路径。期望是/host
 	base := flag.String("base", "", "Directory which mount host root.")
 
 	// log-level

@@ -29,6 +29,7 @@ type Piloter interface {
 }
 
 // NewPiloter instantiates a new piloter
+// 通过basedir实例一个piloter，获取env，判断backprocess是filebeat或fluentd
 func NewPiloter(baseDir string) (Piloter, error) {
 	if os.Getenv(ENV_PILOT_TYPE) == PILOT_FILEBEAT {
 		return NewFilebeatPiloter(baseDir)

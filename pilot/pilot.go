@@ -57,7 +57,7 @@ type Pilot struct {
 	lastReload    time.Time
 	reloadChan    chan bool
 	stopChan      chan bool
-	baseDir       string
+	baseDir       string   //启动时把base路径通过传参进来，宿主机跟路径挂载到容器中的目录
 	logPrefix     []string
 	createSymlink bool
 }
@@ -75,42 +75,48 @@ func Run(templ string, baseDir string) error {
 
 // New returns a log pilot instance
 func New(tplStr string, baseDir string) (*Pilot, error) {
-
+	// 通过模版路径，生成一个模版,源模版为go模版，生成最终采集软件
 	templ, err := template.New("pilot").Parse(tplStr)
 	if err != nil {
 		return nil, err
 	}
-
+	// 如果获取env中dockerapi版本失败，将api版本的变量设置为1。23
 	if os.Getenv("DOCKER_API_VERSION") == "" {
 		os.Setenv("DOCKER_API_VERSION", "1.23")
 	}
-
+	// NewEncClient基于环境变量初始化api客户端
+	// Use DOCKER_HOST to set the url to the docker server.
+	// Use DOCKER_API_VERSION to set the version of the API to reach, leave empty for latest.
+	// Use DOCKER_CERT_PATH to load the TLS certificates from.
+	// Use DOCKER_TLS_VERIFY to enable or disable TLS verification, off by default.
 	client, err := k8s.NewEnvClient()
 	if err != nil {
 		return nil, err
 	}
-
+	// 初始化一个新的piloter实例，
 	piloter, err := NewPiloter(baseDir)
 	if err != nil {
 		return nil, err
 	}
-
+	// 初始化日志前缀为aliyun字符串切片
 	logPrefix := []string{"aliyun"}
+	// 获取env中pilot_log_prefix，如果不为空
 	if os.Getenv(ENV_PILOT_LOG_PREFIX) != "" {
 		envLogPrefix := os.Getenv(ENV_PILOT_LOG_PREFIX)
+		// 按照，切片
 		logPrefix = strings.Split(envLogPrefix, ",")
 	}
-
+	// 获取的是字符串，最终返回值是bool，这类用法createSymlink  always=false  类型bool
 	createSymlink := os.Getenv(ENV_PILOT_CREATE_SYMLINK) == "true"
 	return &Pilot{
-		client:        client,
-		templ:         templ,
-		baseDir:       baseDir,
-		reloadChan:    make(chan bool),
-		stopChan:      make(chan bool),
-		piloter:       piloter,
-		logPrefix:     logPrefix,
-		createSymlink: createSymlink,
+		client:        client,   // dockerclient对象
+		templ:         templ,	// go模版文件
+		baseDir:       baseDir, // /host
+		reloadChan:    make(chan bool),  //重加载配置文件的channel
+		stopChan:      make(chan bool),  //停服务的channel
+		piloter:       piloter,   //piloter对象，就是处理filebeat模版以及启动filebeat
+		logPrefix:     logPrefix,   // 日志前缀
+		createSymlink: createSymlink, // bool ==false
 	}, nil
 }
 
@@ -119,8 +125,9 @@ func (p *Pilot) watch() error {
 	if err := p.cleanConfigs(); err != nil {
 		return err
 	}
-
+	// 执行piltoter的start方法
 	err := p.piloter.Start()
+	//如果有错误并且错误不等于filebeat已经启动
 	if err != nil && ERR_ALREADY_STARTED != err.Error() {
 		return err
 	}
@@ -266,12 +273,13 @@ func (p *Pilot) processAllContainers() error {
 			log.Errorf("fail to process container %s: %v", containerJSON.Name, err)
 		}
 	}
-
+	// containeridS是当前主机running状态的所有容器id
 	return p.processSymlink(containerIDs)
 }
 
 func (p *Pilot) processSymlink(existingContainerIDs map[string]string) error {
 	symlinkContainerIDs := p.listAllSymlinkContainer()
+	// 匹配主机上所有running的容器id和/host/acs/log路径中存在的容器id
 	for containerID := range symlinkContainerIDs {
 		if _, ok := existingContainerIDs[containerID]; !ok {
 			p.removeVolumeSymlink(containerID)
@@ -282,11 +290,12 @@ func (p *Pilot) processSymlink(existingContainerIDs map[string]string) error {
 
 func (p *Pilot) listAllSymlinkContainer() map[string]string {
 	containerIDs := make(map[string]string, 0)
-	linkBaseDir := path.Join(p.baseDir, SYMLINK_LOGS_BASE)
+	linkBaseDir := path.Join(p.baseDir, SYMLINK_LOGS_BASE) // /host/acs/log如果目录不存在直接返回空map
 	if _, err := os.Stat(linkBaseDir); err != nil && os.IsNotExist(err) {
 		return containerIDs
 	}
-
+	// 如果存在就遍历子目录中所有文件
+	// 遍历子目录所有文件生产切片，切片中的string是绝对路径。没搞懂是处理什么场景的
 	projects := listSubDirectory(linkBaseDir)
 	for _, project := range projects {
 		projectPath := path.Join(linkBaseDir, project)
@@ -350,10 +359,10 @@ func container(containerJSON *types.ContainerJSON) map[string]string {
 // 通过容器的inspect信息，获取到容器id、env、mounts、labels、jsonlogpath
 func (p *Pilot) newContainer(containerJSON *types.ContainerJSON) error {
 	id := containerJSON.ID
-	env := containerJSON.Config.Env
-	mounts := containerJSON.Mounts
-	labels := containerJSON.Config.Labels
-	jsonLogPath := containerJSON.LogPath
+	env := containerJSON.Config.Env   //[]string
+	mounts := containerJSON.Mounts    // []types.MountPoint
+	labels := containerJSON.Config.Labels  // map[string]string
+	jsonLogPath := containerJSON.LogPath   //string 终端日志文件路径
 
 	//logConfig.containerDir match types.mountPoint
 	/**
@@ -380,28 +389,29 @@ func (p *Pilot) newContainer(containerJSON *types.ContainerJSON) error {
 			}
 		}
 	}
-
+    // 获取容器的日志配置，传入终端日志文件路径、mounts的[]types.MountPoint、label的map[string]string
 	logConfigs, err := p.getLogConfigs(jsonLogPath, mounts, labels)
 	if err != nil {
 		return err
 	}
 
-	if len(logConfigs) == 0 {
+	if len(logConfigs) == 0 {// 如果容器中未配置采集的label
 		log.Debugf("%s has not log config, skip", id)
 		return nil
 	}
 
-	// create symlink
+	// create symlink  //创建软连接，不知道为啥要创建软连接，容器中未找到相应的目录//始终为真正执行
 	p.createVolumeSymlink(containerJSON)
 
 	//pilot.findMounts(logConfigs, jsonLogPath, mounts)
 	//生成配置
-	logConfig, err := p.render(id, container, logConfigs)
+	logConfig, err := p.render(id, container, logConfigs)//生成配置文件
 	if err != nil {
 		return err
 	}
 	//TODO validate config before save
 	//log.Debugf("container %s log config: %s", id, logConfig)
+	// 写入filebeat配置文件：指定路径和配置文件内容
 	if err = ioutil.WriteFile(p.piloter.GetConfPath(id), []byte(logConfig), os.FileMode(0644)); err != nil {
 		return err
 	}
@@ -412,7 +422,7 @@ func (p *Pilot) newContainer(containerJSON *types.ContainerJSON) error {
 
 func (p *Pilot) tryReload() {
 	select {
-	case p.reloadChan <- true:
+	case p.reloadChan <- true:  // 初始化时没有长度，阻塞类型的chan，第一次启动时先会走default
 	default:
 		log.Info("Another load is pending")
 	}
@@ -550,6 +560,7 @@ func (p *Pilot) tryCheckKafkaTopic(topic string) error {
 	return fmt.Errorf("invalid topic: %s, supported topics: %v", topic, topics)
 }
 
+// 解析logConfig
 func (p *Pilot) parseLogConfig(name string, info *LogInfoNode, jsonLogPath string, mounts map[string]types.MountPoint) (*LogConfig, error) {
 	path := strings.TrimSpace(info.value)
 	if path == "" {
@@ -670,16 +681,18 @@ func (node *LogInfoNode) insert(keys []string, value string) error {
 	if len(keys) == 0 {
 		return nil
 	}
+	// 解决这种aliyun.logs.access.host
 	key := keys[0]
 	if len(keys) > 1 {
 		if child, ok := node.children[key]; ok {
 			child.insert(keys[1:], value)
 		} else {
-			return fmt.Errorf("%s has no parent node", key)
+			return fmt.Errorf("%s has no parent node", key) //没有父节点
 		}
 	} else {
-		child := newLogInfoNode(value)
-		node.children[key] = child
+		// --labelname=aliyun.logs.access
+		child := newLogInfoNode(value) //child := &{value="/usr/local/tomcat/logs/localhost_access_log.*.txt",children="map[string]*LogInfoNode"}
+		node.children[key] = child //node.children[access]=&{value="/usr/local/tomcat/logs/localhost_access_log.*.txt",children=nil}
 	}
 	return nil
 }
@@ -691,11 +704,14 @@ func (node *LogInfoNode) get(key string) string {
 	return ""
 }
 
+// getLogConfigs  获取容器的日志配置，传入终端日志文件路径、mounts的[]types.MountPoint、label的map[string]string
 func (p *Pilot) getLogConfigs(jsonLogPath string, mounts []types.MountPoint, labels map[string]string) ([]*LogConfig, error) {
 	var ret []*LogConfig
 
 	mountsMap := make(map[string]types.MountPoint)
 	for _, mount := range mounts {
+		//  value = /var/lib/kubelet/pods/2a696712-18d0-11ea-8ddf-00163e000708/containers/app-name/7583d21a
+		//  key = /app/logs/
 		mountsMap[mount.Destination] = mount
 	}
 
@@ -706,15 +722,17 @@ func (p *Pilot) getLogConfigs(jsonLogPath string, mounts []types.MountPoint, lab
 	}
 
 	sort.Strings(labelNames)
-	root := newLogInfoNode("")
-	for _, k := range labelNames {
-		for _, prefix := range p.logPrefix {
-			serviceLogs := fmt.Sprintf(LABEL_SERVICE_LOGS_TEMPL, prefix)
-			if !strings.HasPrefix(k, serviceLogs) || strings.Count(k, ".") == 1 {
-				continue
+	root := newLogInfoNode("")  //初始化一个LogInfoNode对象
+	for _, k := range labelNames {  // 循环所有labelname
+		for _, prefix := range p.logPrefix {  // 循环所有log前缀，[]{"aliyun",...env}
+			serviceLogs := fmt.Sprintf(LABEL_SERVICE_LOGS_TEMPL, prefix)  //字符串拼接的结果是aliyun.logs.
+			if !strings.HasPrefix(k, serviceLogs) || strings.Count(k, ".") == 1 { //labelname从头开始未匹配到aliyun.logs.或其中只包含一个"."
+				continue //未匹配到label中含有采集规则
 			}
-
-			logLabel := strings.TrimPrefix(k, serviceLogs)
+			// label包含采集规则
+			logLabel := strings.TrimPrefix(k, serviceLogs)//字符串裁剪，去掉aliyun.logs.
+			// aliyun.logs.access=/usr/local/tomcat/logs/localhost_access_log.*.txt
+			//root.insert([]string{"access"},"/usr/local/tomcat/logs/localhost_access_log.*.txt")
 			if err := root.insert(strings.Split(logLabel, "."), labels[k]); err != nil {
 				return nil, err
 			}
@@ -722,6 +740,21 @@ func (p *Pilot) getLogConfigs(jsonLogPath string, mounts []types.MountPoint, lab
 	}
 
 	for name, node := range root.children {
+		/*
+		// LogConfig log configuration
+		type LogConfig struct {
+			Name         string  // access
+			HostDir      string  // /host
+			ContainerDir string  // /usr/local/tomcat/logs/
+			Format       string  // json
+			FormatConfig map[string]string
+			File         string
+			Tags         map[string]string
+			Target       string
+			EstimateTime bool
+			Stdout       bool
+		}
+		*/
 		logConfig, err := p.parseLogConfig(name, node, jsonLogPath, mountsMap)
 		if err != nil {
 			return nil, err
@@ -743,6 +776,8 @@ func (p *Pilot) exists(containId string) bool {
 func (p *Pilot) render(containerId string, container map[string]string, configList []*LogConfig) (string, error) {
 	for _, config := range configList {
 		log.Infof("logs: %s = %v", containerId, config)
+		//INFO[7206] logs: b853693d79a11d1f53910d9f568638849675b747a313f21b43f8ef44bfd3d563 = &{access /host/var/lib/docker/volumes/4c09c0bded873a24f74add7a3bc2c82dfd720416973e2753a2dc4c6725259527/_data /usr/local/tomcat/logs nonex map[time_key:_timestamp] localhost_access_log.*.txt map[index:access topic:access]  true false}
+		//INFO[7206] logs: b853693d79a11d1f53910d9f568638849675b747a313f21b43f8ef44bfd3d563 = &{catalina /host/var/lib/docker/containers/b853693d79a11d1f53910d9f568638849675b747a313f21b43f8ef44bfd3d563  nonex map[time_format:%Y-%m-%dT%H:%M:%S.%NZ] b853693d79a11d1f53910d9f568638849675b747a313f21b43f8ef44bfd3d563-json.log* map[index:catalina topic:catalina]  false true}
 	}
 
 	output := os.Getenv(ENV_FLUENTD_OUTPUT)
@@ -760,7 +795,8 @@ func (p *Pilot) render(containerId string, container map[string]string, configLi
 		"container":   container,
 		"output":      output,
 	}
-	if err := p.templ.Execute(&buf, context); err != nil {
+	 // io.write 和数据
+	if err := p.templ.Execute(&buf, context); err != nil {// 这一步才是从模版生成filebeat配置文件的方法
 		return "", err
 	}
 	return buf.String(), nil
@@ -781,10 +817,10 @@ func (p *Pilot) reload() error {
 }
 
 func (p *Pilot) createVolumeSymlink(containerJSON *types.ContainerJSON) error {
-	if !p.createSymlink {
+	if !p.createSymlink { //如果非false，那么永远等于true
 		return nil
 	}
-
+	//下面并未执行
 	linkBaseDir := path.Join(p.baseDir, SYMLINK_LOGS_BASE)
 	if _, err := os.Stat(linkBaseDir); err != nil && os.IsNotExist(err) {
 		if err := os.MkdirAll(linkBaseDir, 0777); err != nil {
@@ -837,7 +873,7 @@ func (p *Pilot) removeVolumeSymlink(containerId string) error {
 	if !p.createSymlink {
 		return nil
 	}
-
+	// 下面并未执行
 	linkBaseDir := path.Join(p.baseDir, SYMLINK_LOGS_BASE)
 	containerLinkDirs, _ := filepath.Glob(path.Join(linkBaseDir, "*", "*", containerId))
 	if containerLinkDirs == nil {
